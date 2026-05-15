@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("medibot-tagger")
 
 app = FastAPI()
-db = firestore.Client()
+db = firestore.Client(database="medibot-connect")
 JST = timezone(timedelta(hours=9))
 
 COLLECTION = "medibot_connect_processed_reservations"
@@ -73,11 +73,16 @@ def fetch_events(client: httpx.Client, start: datetime, end: datetime) -> list[d
 
 
 def add_tag(client: httpx.Client, friend_id: str, tag_id: str) -> None:
-    r = client.post("/api/tags/bulk", json={
+    """単一ユーザーに単一タグを付与する。
+    
+    ステップ配信の「タグ付与時」トリガーを発火させるため、
+    `PUT /api/tags`（チャット画面と同じエンドポイント）を使用する。
+    `POST /api/tags/bulk` は一括処理用でトリガーが発火しないため使用しない。
+    """
+    r = client.put("/api/tags", json={
         "botId": BOT_ID,
-        "userIds": [friend_id],
-        "operation": "add",
-        "tagIds": [tag_id],
+        "lineUserId": friend_id,
+        "tagId": tag_id,
     })
     if r.status_code == 401:
         raise SessionExpired()
