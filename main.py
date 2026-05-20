@@ -124,7 +124,7 @@ def process_reservations() -> dict:
     cookie = get_session_cookie()
     now = datetime.now(JST)
     start = now - timedelta(hours=1)
-    end = now + timedelta(days=14)
+    end = now + timedelta(days=365)
 
     summary = {"checked": 0, "tagged": 0, "skipped": 0, "errors": []}
 
