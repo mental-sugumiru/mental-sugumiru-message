@@ -5,6 +5,8 @@ DOCTOR_MAP = {
     "cmnr5cr372maa2c2t6jn9qx9l": {"name": "釜先生",   "tag_id": "cmov5urwy1ml52g2txzgs2lii"},
     "cmocdb7z31jbw132unidyuerl": {"name": "清水先生", "tag_id": "cmov5v19q1ml92g2tkkicqme0"},
     "cmocdbrrw1jc4132ulqjud185": {"name": "宮路先生", "tag_id": "cmov5v8ca1mlb2g2tazpir2sq"},
+    "cmpc9188j03cz0z2v0lma7m5r": {"name": "金井先生", "tag_id": "cmpc806lq035x0z2vwuyruaw5"},
+    "cmpc9190k03d10z2v0vjt81rz": {"name": "遠藤先生", "tag_id": "cmpc809nw035z0z2ves02e2z1"},
 }
 
 # 「時間帯で予約」フォームIDのみ対象（個別フォームは既存ステップ配信が拾うので除外）
