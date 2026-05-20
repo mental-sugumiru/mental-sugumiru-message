@@ -8,6 +8,7 @@ from google.cloud import firestore, secretmanager
 
 from config import (
     DOCTOR_MAP,
+    TARGET_FORM_IDS,
     BOT_ID, ORGANIZATION_ID, MEDIBOT_BASE,
 )
 
@@ -149,6 +150,8 @@ def process_reservations() -> dict:
             if ev.get("eventType") == "block":
                 continue
             if ev.get("isDeleted"):
+                continue
+            if ev.get("formId") not in TARGET_FORM_IDS:
                 continue
 
             reservation_id = ev.get("id")
