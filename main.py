@@ -1,5 +1,6 @@
 import os
 import logging
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -21,8 +22,10 @@ JST = timezone(timedelta(hours=9))
 
 COLLECTION = "medibot_connect_processed_reservations"
 
+
 class SessionExpired(Exception):
     pass
+
 
 def get_session_cookie() -> str:
     project = os.environ["GCP_PROJECT"]
@@ -30,6 +33,7 @@ def get_session_cookie() -> str:
     client = secretmanager.SecretManagerServiceClient()
     name = f"projects/{project}/secrets/{secret_name}/versions/latest"
     return client.access_secret_version(name=name).payload.data.decode().strip()
+
 
 def medibot_client(cookie: str) -> httpx.Client:
     return httpx.Client(
@@ -44,6 +48,7 @@ def medibot_client(cookie: str) -> httpx.Client:
         timeout=30.0,
     )
 
+
 def fetch_events(client: httpx.Client, start: datetime, end: datetime) -> list[dict]:
     """スケジュールイベント配列を返す。多様なレスポンス構造に対応。"""
     r = client.post("/api/schedule", json={
@@ -57,8 +62,6 @@ def fetch_events(client: httpx.Client, start: datetime, end: datetime) -> list[d
     r.raise_for_status()
     body = r.json()
 
-    # 想定: {"status":"success","message":{"events":[...]}}
-    # 念のため複数パターン対応
     if isinstance(body, list):
         return body
     msg = body.get("message", body) if isinstance(body, dict) else body
@@ -68,13 +71,9 @@ def fetch_events(client: httpx.Client, start: datetime, end: datetime) -> list[d
         return msg.get("events", [])
     return []
 
-def add_tag(client: httpx.Client, friend_id: str, tag_id: str) -> None:
-    """単一ユーザーに単一タグを付与する。
 
-    ステップ配信の「タグ付与時」トリガーを発火させるため、
-    `PUT /api/tags`（チャット画面と同じエンドポイント）を使用する。
-    `POST /api/tags/bulk` は一括処理用でトリガーが発火しないため使用しない。
-    """
+def add_tag(client: httpx.Client, friend_id: str, tag_id: str) -> None:
+    """単一ユーザーに単一タグを付与する（ステップ配信トリガー用に PUT /api/tags）。"""
     r = client.put("/api/tags", json={
         "botId": BOT_ID,
         "lineUserId": friend_id,
@@ -84,31 +83,51 @@ def add_tag(client: httpx.Client, friend_id: str, tag_id: str) -> None:
         raise SessionExpired()
     r.raise_for_status()
 
-def should_process(reservation_id: str, current_updated_at: str | None) -> bool:
-    """この予約を今回処理すべきかどうかを判定する。
 
-    - Firestore にレコードが無い: 新規予約 → 処理する
-    - レコードがあり、保存済み updatedAt と現在の updatedAt が一致: 変更なし → スキップ
-    - レコードはあるが保存済み updatedAt と異なる: 予約変更 → 再処理
+def reservation_fingerprint(ev: dict) -> str:
+    """再送判断に使うフィールドだけからフィンガープリントを生成する。
+
+    対応ステータス(reservationStatusId) や決済関連は含めない。
+    これにより 対応ステータス変更だけでは再タグ付け（=メッセージ再送）されない。
     """
+    payload = "|".join([
+        str(ev.get("resourceId") or ""),
+        str(ev.get("start") or ""),
+        str(ev.get("end") or ""),
+        str(ev.get("formId") or ""),
+        str(ev.get("friendId") or ""),
+        "1" if ev.get("isDeleted") else "0",
+    ])
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def should_process(reservation_id: str, fingerprint: str) -> bool:
+    """新規 or 担当医/時間/フォームが変わった場合のみ True を返す。"""
     snap = db.collection(COLLECTION).document(reservation_id).get()
     if not snap.exists:
         return True
     saved = snap.to_dict() or {}
-    return saved.get("updatedAt") != current_updated_at
+    # 旧バージョン互換: fingerprint が無いレコードは「過去に処理済み」とみなしスキップ
+    if "fingerprint" not in saved:
+        return False
+    return saved.get("fingerprint") != fingerprint
+
 
 def mark_processed(
     reservation_id: str,
     friend_id: str,
     doctor: str,
+    fingerprint: str,
     updated_at: str | None,
 ) -> None:
     db.collection(COLLECTION).document(reservation_id).set({
         "friendId": friend_id,
         "doctor": doctor,
-        "updatedAt": updated_at,
+        "fingerprint": fingerprint,
+        "updatedAt": updated_at,  # ログ用に残す（判定には使わない）
         "processedAt": firestore.SERVER_TIMESTAMP,
     })
+
 
 def notify_session_expired():
     webhook = os.environ.get("ALERT_WEBHOOK_URL")
@@ -120,6 +139,7 @@ def notify_session_expired():
             "Secret Manager の medibot-session-cookie を更新してください。"})
     except Exception:
         pass
+
 
 def process_reservations() -> dict:
     cookie = get_session_cookie()
@@ -144,7 +164,6 @@ def process_reservations() -> dict:
         for ev in events:
             if not isinstance(ev, dict):
                 continue
-            # 自組織以外、ブロック枠、削除済みは除外
             if ev.get("organizationId") != ORGANIZATION_ID:
                 continue
             if ev.get("eventType") == "block":
@@ -164,7 +183,8 @@ def process_reservations() -> dict:
 
             summary["checked"] += 1
 
-            if not should_process(reservation_id, updated_at):
+            fp = reservation_fingerprint(ev)
+            if not should_process(reservation_id, fp):
                 summary["skipped"] += 1
                 continue
 
@@ -176,11 +196,11 @@ def process_reservations() -> dict:
 
             try:
                 add_tag(client, friend_id, doctor["tag_id"])
-                mark_processed(reservation_id, friend_id, doctor["name"], updated_at)
+                mark_processed(reservation_id, friend_id, doctor["name"], fp, updated_at)
                 summary["tagged"] += 1
                 log.info(
                     f"Tagged {friend_id} as {doctor['name']} "
-                    f"(reservation={reservation_id}, updatedAt={updated_at})")
+                    f"(reservation={reservation_id}, fp={fp[:8]})")
             except SessionExpired:
                 notify_session_expired()
                 raise HTTPException(401, "Medibot session expired")
@@ -190,11 +210,13 @@ def process_reservations() -> dict:
 
     return summary
 
+
 # ---------- HTTP エンドポイント ----------
 @app.get("/")
 @app.get("/healthz")
 def healthz():
     return {"ok": True}
+
 
 @app.post("/run")
 async def run(request: Request):
